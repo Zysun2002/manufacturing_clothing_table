@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 from tqdm import tqdm
 
+import ipdb
+
 # ==========================================
 # USER CONFIGURATION
 # ==========================================
@@ -12,8 +14,9 @@ MATLAB_EXE_PATH = r"E:\Ziyu\softwares\MATLAB\bin\matlab.exe"
 EXCEL_FILE_PATH = r"E:\Ziyu\workspace\temp_workspace\generate_clothing_table\matlab\giant_table.xlsx"
 # Directory where the MATLAB script will run from
 WORKSPACE_DIR = r"E:\Ziyu\workspace\temp_workspace\generate_clothing_table\matlab"
-TEST_LIMIT = None  # Set to None to process all rows
-SAVE_INTERVAL = 1
+TEST_LIMIT = None  # Debug: process only one row
+# Disable frequent Excel writes to improve performance
+SAVE_INTERVAL = 1  # Set to an integer (e.g., 100) to enable periodic saves
 # ==========================================
 
 def run_batch_simulation():
@@ -34,33 +37,22 @@ def run_batch_simulation():
         print(f"Error reading Excel file: {e}")
         return
 
-    # Ensure result columns exist in the DataFrame
-    # Map internal variable names to Chinese column headers
-    col_map_results = {
-        't2burn': '二度烧伤时间(s)',
-        't3burn': '三度烧伤时间(s)',
-        'tstress': '热应激时间(s)',
-        'Tcore': '最终核心温度(℃)',
-        'Taverage': '最终皮肤温度(℃)'
-    }
-    
-    for col in col_map_results.values():
-        if col not in df.columns:
-            df[col] = None
+    # Drop legacy result columns (Chinese headers) if present
+    legacy_cols = ['二度烧伤时间(s)', '三度烧伤时间(s)', '热应激时间(s)', '最终核心温度(℃)', '最终皮肤温度(℃)']
+    df = df.drop(columns=legacy_cols, errors='ignore')
 
-    # Determine rows to process
-    # Filter for rows where the first result column is missing (NaN)
-    target_col = col_map_results['t2burn']
-    missing_data_mask = df[target_col].isna()
-    
-    rows_to_process = df[missing_data_mask]
-    
+    # Determine rows to process: process all rows (optional TEST_LIMIT applies)
+    rows_to_process = df
     if TEST_LIMIT is not None:
         subset = rows_to_process.head(TEST_LIMIT)
     else:
         subset = rows_to_process
-        
-    print(f"Found {len(rows_to_process)} rows with missing data. Processing {len(subset)} rows...")
+
+    if len(subset) == 0:
+        print("No rows to process; running debug on first row.")
+        subset = df.head(1)
+
+    print(f"Processing {len(subset)} rows...")
     
     # Pre-create param_0001..param_1203 columns once to avoid fragmentation
     param_cols = [f"param_{j:04d}" for j in range(1, 1204)]
@@ -72,8 +64,7 @@ def run_batch_simulation():
 
     for i, (index, row) in enumerate(tqdm(subset.iterrows(), total=len(subset), desc="Simulating")):
         # print(f"\nProcessing row {index + 1}...")
-        import ipdb
-        ipdb.set_trace()
+
         try:
             # Helper to get value safely
             def get_val(col, default):
@@ -110,7 +101,8 @@ def run_batch_simulation():
             # Run MATLAB
             # encoding='gbk' is often needed for Windows command line output in China region
             result = subprocess.run(cmd, capture_output=True, text=True, encoding='gbk', errors='ignore', cwd=workspace_dir)
-            
+            # print(f"MATLAB return code: {result.returncode}")
+
             if result.returncode != 0:
                 print(f"MATLAB execution failed for row {index + 1}")
                 # print(result.stdout)
@@ -119,108 +111,66 @@ def run_batch_simulation():
 
             # Parse output
             output = result.stdout
+            # print("--- MATLAB stdout (first 500 chars) ---")
+            print(output[:500])
 
-            # First, try extended RESULTS line with 1203 CSV values
+            # Expect a single RESULTS line with 1203 comma-separated values
             extended_line = None
             for line in output.splitlines():
                 if line.strip().startswith("RESULTS:"):
                     extended_line = line.strip()[len("RESULTS:"):].strip()
                     break
 
-            parsed = False
-            if extended_line:
-                parts = [p.strip() for p in extended_line.split(',') if p.strip() != '']
-                values = []
-                for p in parts:
-                    try:
-                        values.append(float(p))
-                    except ValueError:
-                        p_norm = p.replace('D', 'E').replace('d', 'e')
-                        try:
-                            values.append(float(p_norm))
-                        except ValueError:
-                            values.append(None)
-                if len(values) == 1203:
-                    for j, val in enumerate(values, start=1):
-                        df.at[index, f"param_{j:04d}"] = val
-                    parsed = True
+            if not extended_line:
+                print(f"Could not find RESULTS line for row {index + 1}")
+                continue
+            
+            parts = [p.strip() for p in extended_line.split(',')]
+            # print(f"RESULTS parts count: {len(parts)}")
+            try:
+                values = [float(p) for p in parts]
+            except ValueError:
+                print(f"RESULTS line contains non-numeric values for row {index + 1}")
+                continue
 
-            if not parsed:
-                # Fallback: parse MATLAB table (time, core, average) and summary echoes
-                core_vals = []
-                avg_vals = []
-                table_started = False
-                for line in output.splitlines():
-                    l = line.strip()
-                    if ('时间' in l) or ('Ê±¼ä' in l):
-                        table_started = True
-                        continue
-                    if table_started:
-                        m = re.match(r"^\s*([0-9]+)\s+([+-]?[0-9]*\.?[0-9]+)\s+([+-]?[0-9]*\.?[0-9]+)\s*$", l)
-                        if m:
-                            try:
-                                core_vals.append(float(m.group(2)))
-                                avg_vals.append(float(m.group(3)))
-                            except ValueError:
-                                pass
-                        if len(core_vals) >= 600 and len(avg_vals) >= 600:
-                            break
+            if len(values) != 1203:
+                print(f"RESULTS line has {len(values)} values (expected 1203) for row {index + 1}")
+                continue
 
-                # Extract t2burn/t3burn/tstress from variable echoes if present
-                def extract_num_after(label):
-                    # Handles forms like: t2burn =\n    4.6000 or t2burn = 4.6000
-                    m = re.search(label + r"\s*=\s*([+-]?[0-9]*\.?[0-9]+)", output)
-                    if m:
-                        try:
-                            return float(m.group(1))
-                        except ValueError:
-                            return None
-                    return None
-
-                t2 = extract_num_after('t2burn')
-                t3 = extract_num_after('t3burn')
-                ts = extract_num_after('tstress')
-
-                # Assemble 1203: 3 summary + 600 core + 600 average
-                if len(core_vals) or len(avg_vals):
-                    # Pad/truncate to 600
-                    def fit600(vals):
-                        vals = list(vals)
-                        if len(vals) < 600:
-                            vals += [None] * (600 - len(vals))
-                        else:
-                            vals = vals[:600]
-                        return vals
-                    core600 = fit600(core_vals)
-                    avg600 = fit600(avg_vals)
-
-                    df.at[index, "param_0001"] = t2
-                    df.at[index, "param_0002"] = t3
-                    df.at[index, "param_0003"] = ts
-                    for j, val in enumerate(core600, start=4):
-                        df.at[index, f"param_{j:04d}"] = val
-                    for j, val in enumerate(avg600, start=604):
-                        df.at[index, f"param_{j:04d}"] = val
-                    parsed = True
-
-            if not parsed:
-                print(f"Could not parse results for row {index + 1}")
+            # Vectorized assignment into pre-created columns
+            df.loc[index, param_cols] = values
+            # print(f"Wrote 1203 values to row {index}")
 
         except Exception as e:
             print(f"Error processing row {index + 1}: {e}")
 
-        # Save every 10 iterations
-        if (i + 1) % SAVE_INTERVAL == 0:
+        # Optional periodic saves if SAVE_INTERVAL is set
+        if SAVE_INTERVAL and (i + 1) % SAVE_INTERVAL == 0:
             try:
-                df.to_excel(excel_path, index=False, engine='openpyxl')
+                with pd.ExcelWriter(excel_path, engine='xlsxwriter') as writer:
+                    df.to_excel(writer, index=False)
             except Exception as e:
-                print(f"Error saving intermediate Excel file: {e}")
+                print(f"Error saving intermediate Excel file with xlsxwriter: {e}")
+                try:
+                    with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+                        df.to_excel(writer, index=False)
+                    print("Intermediate save successful using openpyxl.")
+                except Exception as e2:
+                    print(f"Fallback intermediate save failed: {e2}")
 
     # Save results back to the original file
     print(f"\nSaving updated data to {excel_path}...")
     try:
-        df.to_excel(excel_path, index=False, engine='openpyxl')
-        print("Save successful.")
+        # Use xlsxwriter for faster writes
+        try:
+            with pd.ExcelWriter(excel_path, engine='xlsxwriter') as writer:
+                df.to_excel(writer, index=False)
+            print("Save successful (xlsxwriter).")
+        except Exception as e1:
+            print(f"Save with xlsxwriter failed: {e1}. Falling back to openpyxl...")
+            with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False)
+            print("Save successful (openpyxl).")
     except Exception as e:
         print(f"Error saving Excel file: {e}")
 
