@@ -814,7 +814,7 @@ try
     % Order required: t2burn, t3burn, tstress, then Tcore(600), Taverage(600)
     header3 = [t2burn, t3burn, tstress];
     all_results = [header3(:); core600(:); avg600(:)];
-    fprintf('%s\n', strjoin(string(all_results.'), ','));
+    fprintf('RESULTS:%s\n', strjoin(string(all_results.'), ','));
 catch ME
     warning('RESULTS export failed: %s', ME.message);
 end

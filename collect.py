@@ -13,7 +13,7 @@ EXCEL_FILE_PATH = r"E:\Ziyu\workspace\temp_workspace\generate_clothing_table\mat
 # Directory where the MATLAB script will run from
 WORKSPACE_DIR = r"E:\Ziyu\workspace\temp_workspace\generate_clothing_table\matlab"
 TEST_LIMIT = None  # Set to None to process all rows
-SAVE_INTERVAL = 1000
+SAVE_INTERVAL = 1
 # ==========================================
 
 def run_batch_simulation():
@@ -29,7 +29,7 @@ def run_batch_simulation():
         return
 
     try:
-        df = pd.read_excel(excel_path)
+        df = pd.read_excel(excel_path, engine='openpyxl')
     except Exception as e:
         print(f"Error reading Excel file: {e}")
         return
@@ -62,9 +62,18 @@ def run_batch_simulation():
         
     print(f"Found {len(rows_to_process)} rows with missing data. Processing {len(subset)} rows...")
     
+    # Pre-create param_0001..param_1203 columns once to avoid fragmentation
+    param_cols = [f"param_{j:04d}" for j in range(1, 1204)]
+    missing_cols = [c for c in param_cols if c not in df.columns]
+    if missing_cols:
+        # Create a new DataFrame with missing columns initialized to None and concat once
+        init_df = pd.DataFrame({c: [None] * len(df) for c in missing_cols})
+        df = pd.concat([df.reset_index(drop=True), init_df], axis=1)
+
     for i, (index, row) in enumerate(tqdm(subset.iterrows(), total=len(subset), desc="Simulating")):
         # print(f"\nProcessing row {index + 1}...")
-        
+        import ipdb
+        ipdb.set_trace()
         try:
             # Helper to get value safely
             def get_val(col, default):
@@ -110,24 +119,92 @@ def run_batch_simulation():
 
             # Parse output
             output = result.stdout
-            # print(output) # Debugging
 
-            # Regex to find 5 floating point numbers separated by commas
-            # Matches numbers like 12.34, 0.00, -5.67
-            match = re.search(r'(-?\d+\.\d+),(-?\d+\.\d+),(-?\d+\.\d+),(-?\d+\.\d+),(-?\d+\.\d+)', output)
-            
-            if match:
-                # Update the original DataFrame directly using Chinese column names
-                df.at[index, col_map_results['t2burn']] = float(match.group(1))
-                df.at[index, col_map_results['t3burn']] = float(match.group(2))
-                df.at[index, col_map_results['tstress']] = float(match.group(3))
-                df.at[index, col_map_results['Tcore']] = float(match.group(4))
-                df.at[index, col_map_results['Taverage']] = float(match.group(5))
-                
-                # print(f"Parsed and updated results for row {index + 1}")
-            else:
+            # First, try extended RESULTS line with 1203 CSV values
+            extended_line = None
+            for line in output.splitlines():
+                if line.strip().startswith("RESULTS:"):
+                    extended_line = line.strip()[len("RESULTS:"):].strip()
+                    break
+
+            parsed = False
+            if extended_line:
+                parts = [p.strip() for p in extended_line.split(',') if p.strip() != '']
+                values = []
+                for p in parts:
+                    try:
+                        values.append(float(p))
+                    except ValueError:
+                        p_norm = p.replace('D', 'E').replace('d', 'e')
+                        try:
+                            values.append(float(p_norm))
+                        except ValueError:
+                            values.append(None)
+                if len(values) == 1203:
+                    for j, val in enumerate(values, start=1):
+                        df.at[index, f"param_{j:04d}"] = val
+                    parsed = True
+
+            if not parsed:
+                # Fallback: parse MATLAB table (time, core, average) and summary echoes
+                core_vals = []
+                avg_vals = []
+                table_started = False
+                for line in output.splitlines():
+                    l = line.strip()
+                    if ('时间' in l) or ('Ê±¼ä' in l):
+                        table_started = True
+                        continue
+                    if table_started:
+                        m = re.match(r"^\s*([0-9]+)\s+([+-]?[0-9]*\.?[0-9]+)\s+([+-]?[0-9]*\.?[0-9]+)\s*$", l)
+                        if m:
+                            try:
+                                core_vals.append(float(m.group(2)))
+                                avg_vals.append(float(m.group(3)))
+                            except ValueError:
+                                pass
+                        if len(core_vals) >= 600 and len(avg_vals) >= 600:
+                            break
+
+                # Extract t2burn/t3burn/tstress from variable echoes if present
+                def extract_num_after(label):
+                    # Handles forms like: t2burn =\n    4.6000 or t2burn = 4.6000
+                    m = re.search(label + r"\s*=\s*([+-]?[0-9]*\.?[0-9]+)", output)
+                    if m:
+                        try:
+                            return float(m.group(1))
+                        except ValueError:
+                            return None
+                    return None
+
+                t2 = extract_num_after('t2burn')
+                t3 = extract_num_after('t3burn')
+                ts = extract_num_after('tstress')
+
+                # Assemble 1203: 3 summary + 600 core + 600 average
+                if len(core_vals) or len(avg_vals):
+                    # Pad/truncate to 600
+                    def fit600(vals):
+                        vals = list(vals)
+                        if len(vals) < 600:
+                            vals += [None] * (600 - len(vals))
+                        else:
+                            vals = vals[:600]
+                        return vals
+                    core600 = fit600(core_vals)
+                    avg600 = fit600(avg_vals)
+
+                    df.at[index, "param_0001"] = t2
+                    df.at[index, "param_0002"] = t3
+                    df.at[index, "param_0003"] = ts
+                    for j, val in enumerate(core600, start=4):
+                        df.at[index, f"param_{j:04d}"] = val
+                    for j, val in enumerate(avg600, start=604):
+                        df.at[index, f"param_{j:04d}"] = val
+                    parsed = True
+
+            if not parsed:
                 print(f"Could not parse results for row {index + 1}")
-                # print(f"Output was: {output}")
 
         except Exception as e:
             print(f"Error processing row {index + 1}: {e}")
@@ -135,14 +212,14 @@ def run_batch_simulation():
         # Save every 10 iterations
         if (i + 1) % SAVE_INTERVAL == 0:
             try:
-                df.to_excel(excel_path, index=False)
+                df.to_excel(excel_path, index=False, engine='openpyxl')
             except Exception as e:
                 print(f"Error saving intermediate Excel file: {e}")
 
     # Save results back to the original file
     print(f"\nSaving updated data to {excel_path}...")
     try:
-        df.to_excel(excel_path, index=False)
+        df.to_excel(excel_path, index=False, engine='openpyxl')
         print("Save successful.")
     except Exception as e:
         print(f"Error saving Excel file: {e}")

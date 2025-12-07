@@ -1,0 +1,1 @@
+ & "E:\Ziyu\softwares\MATLAB\bin\matlab.exe" -batch "cd('E:\Ziyu\workspace\temp_workspace\generate_clothing_table\matlab'); Tamb=40; Trad=150; meta_rate=120; Ret=6; Lair=0.00005; Eshell=0.8; Lshell=0.0006; Dshell=100; Sshell=1000; kshell=0.03; run"
