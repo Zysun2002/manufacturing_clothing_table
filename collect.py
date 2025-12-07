@@ -11,7 +11,7 @@ import ipdb
 # USER CONFIGURATION
 # ==========================================
 MATLAB_EXE_PATH = r"E:\Ziyu\softwares\MATLAB\bin\matlab.exe"
-EXCEL_FILE_PATH = r"E:\Ziyu\workspace\temp_workspace\generate_clothing_table\matlab\giant_table.xlsx"
+EXCEL_FILE_PATH = r"E:\Ziyu\workspace\temp_workspace\generate_clothing_table\matlab\giant_table.csv"
 # Directory where the MATLAB script will run from
 WORKSPACE_DIR = r"E:\Ziyu\workspace\temp_workspace\generate_clothing_table\matlab"
 TEST_LIMIT = None  # Debug: process only one row
@@ -41,22 +41,34 @@ def run_batch_simulation():
     legacy_cols = ['二度烧伤时间(s)', '三度烧伤时间(s)', '热应激时间(s)', '最终核心温度(℃)', '最终皮肤温度(℃)']
     df = df.drop(columns=legacy_cols, errors='ignore')
 
-    # Determine rows to process: process all rows (optional TEST_LIMIT applies)
-    rows_to_process = df
+    # Determine rows to process: start from rows with no output data (all target cols NaN)
+    target_cols = (
+        ['t2brun', 't3brun', 'tstress'] +
+        [f'Tcore{j:03d}' for j in range(1, 601)] +
+        [f'Taverage{j:03d}' for j in range(1, 601)]
+    )
+    # Ensure columns exist for the mask; create temporarily if absent
+    for c in target_cols:
+        if c not in df.columns:
+            df[c] = None
+
+    empty_outputs_mask = df[target_cols].isna().all(axis=1)
+    rows_to_process = df[empty_outputs_mask]
+
     if TEST_LIMIT is not None:
         subset = rows_to_process.head(TEST_LIMIT)
     else:
         subset = rows_to_process
 
     if len(subset) == 0:
-        print("No rows to process; running debug on first row.")
+        print("No rows with empty outputs; running debug on first row.")
         subset = df.head(1)
 
-    print(f"Processing {len(subset)} rows...")
+    print(f"Processing {len(subset)} rows (starting at first empty-output row)...")
     
-    # Pre-create param_0001..param_1203 columns once to avoid fragmentation
-    param_cols = [f"param_{j:04d}" for j in range(1, 1204)]
-    missing_cols = [c for c in param_cols if c not in df.columns]
+    # Pre-create requested columns once to avoid fragmentation
+    # (target_cols already defined above)
+    missing_cols = [c for c in target_cols if c not in df.columns]
     if missing_cols:
         # Create a new DataFrame with missing columns initialized to None and concat once
         init_df = pd.DataFrame({c: [None] * len(df) for c in missing_cols})
@@ -137,8 +149,8 @@ def run_batch_simulation():
                 print(f"RESULTS line has {len(values)} values (expected 1203) for row {index + 1}")
                 continue
 
-            # Vectorized assignment into pre-created columns
-            df.loc[index, param_cols] = values
+            # Vectorized assignment into pre-created columns with requested names/order
+            df.loc[index, target_cols] = values
             # print(f"Wrote 1203 values to row {index}")
 
         except Exception as e:
